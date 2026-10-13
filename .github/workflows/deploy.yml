@@ -1,0 +1,74 @@
+# Builds the static (in-browser) PEG visualizer against the current DuckDB grammar and publishes it on GitHub Pages.
+# The grammar is plain text in duckdb/duckdb, so no DuckDB binary is needed: the workflow checks out just the
+# grammar files from the configured branch, every night and on demand.
+name: Deploy PEG visualizer
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 4 * * *" # daily, to pick up grammar changes in duckdb/duckdb
+  workflow_dispatch:
+    inputs:
+      duckdb_ref:
+        description: "duckdb/duckdb branch, tag or commit to take the grammar from"
+        default: "v2.0-cyanoptera"
+        required: true
+
+env:
+  DUCKDB_REF: ${{ inputs.duckdb_ref || 'v2.0-cyanoptera' }}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the DuckDB grammar
+        uses: actions/checkout@v4
+        with:
+          repository: duckdb/duckdb
+          ref: ${{ env.DUCKDB_REF }}
+          path: duckdb
+          sparse-checkout: |
+            src/include/duckdb/parser/peg/inlined_grammar.gram
+            src/parser/peg/grammar
+          sparse-checkout-cone-mode: false
+
+      - name: Build the static site
+        run: |
+          sha=$(git -C duckdb rev-parse --short HEAD)
+          date=$(git -C duckdb log -1 --format=%cs)
+          grammar=duckdb/src/include/duckdb/parser/peg/inlined_grammar.gram
+          if [ ! -f "$grammar" ]; then grammar=duckdb/src/parser/peg/grammar; fi
+          python3 build_static.py --grammar "$grammar" --out dist \
+            --label "duckdb/duckdb@${DUCKDB_REF} (${sha}, ${date})"
+          echo "{\"ref\": \"${DUCKDB_REF}\", \"commit\": \"${sha}\", \"date\": \"${date}\"}" > dist/grammar-info.json
+
+      - name: Smoke test the parser against the fetched grammar
+        run: |
+          python3 server.py --grammar dist/grammar.gram --sql "SELECT a, count(*) FROM t WHERE x = 1 GROUP BY ALL" --tree-only | head -3
+          python3 server.py --grammar dist/grammar.gram --sql "SELECT * FROM t WHERE" --tree-only | head -2
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

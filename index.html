@@ -1,0 +1,942 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DuckDB PEG parser visualizer</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1d1d1f; --muted: #6e6e73; --border: #d9d9de; --panel: #f5f5f7; --accent: #0a66c2;
+    --ok: #1a7f37; --ok-bg: #e6f4ea; --fail: #c0392b; --fail-bg: #fbe9e7; --skip: #8a6d1f; --skip-bg: #fff6d6;
+    --cache: #6b3fa0; --cache-bg: #efe6fa; --hl: #ffe08a; --hl2: #cfe3ff; --code: #f0f0f3;
+    --bar: #cfe3ff; --bar-b: #7fb0ea; --bar-tok: #e3e3e8; --bar-tok-b: #b5b5bd;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1b1b1f; --fg: #e8e8ea; --muted: #9a9aa3; --border: #3a3a42; --panel: #25252b; --accent: #6cb4ff;
+      --ok: #5fcf80; --ok-bg: #1e3326; --fail: #ff7b6b; --fail-bg: #3a2320; --skip: #e3c56a; --skip-bg: #3a331c;
+      --cache: #c8a6ff; --cache-bg: #2f2540; --hl: #7a5f00; --hl2: #1f3b63; --code: #2b2b32;
+      --bar: #1f3b63; --bar-b: #4b7fbf; --bar-tok: #34343c; --bar-tok-b: #5a5a66;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; color: var(--fg); background: var(--bg); display: flex; flex-direction: column; height: 100vh; }
+  code, pre, textarea, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+  header { display: flex; align-items: center; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--border); background: var(--panel); flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header .meta, .meta { color: var(--muted); font-size: 12px; }
+  .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 8px 14px; border-bottom: 1px solid var(--border); }
+  .controls label, .pane-head label { display: inline-flex; gap: 4px; align-items: center; color: var(--muted); white-space: nowrap; }
+  textarea { width: 100%; min-height: 64px; resize: vertical; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); }
+  button, select, input[type=text] { font: inherit; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel); color: var(--fg); }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
+  button:hover { filter: brightness(1.05); cursor: pointer; }
+  button.small { padding: 2px 8px; font-size: 12px; }
+  .sqlbox { padding: 8px 14px 0; }
+  .tokens { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 14px 8px; border-bottom: 1px solid var(--border); min-height: 34px; align-items: center; }
+  .tok { padding: 1px 6px; border-radius: 4px; border: 1px solid var(--border); background: var(--panel); cursor: default; }
+  .tok .ty { color: var(--muted); font-size: 10px; margin-left: 4px; }
+  .tok.KEYWORD { border-color: #6a8fd8; } .tok.IDENTIFIER { border-color: #5aa469; } .tok.STRING_LITERAL { border-color: #d49a3a; }
+  .tok.NUMBER_LITERAL { border-color: #b36bd4; } .tok.OPERATOR { border-color: #999; } .tok.END_OF_INPUT, .tok.TERMINATOR { color: var(--muted); }
+  .tok.hl { background: var(--hl); } .tok.err { background: var(--fail-bg); border-color: var(--fail); }
+  .status-line { padding: 6px 14px; font-size: 12px; border-bottom: 1px solid var(--border); display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
+  .status-line .ok { color: var(--ok); font-weight: 600; } .status-line .fail { color: var(--fail); font-weight: 600; }
+  .status-line .warn { color: var(--skip); }
+  main { flex: 1; display: flex; min-height: 0; }
+  .pane { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+  .pane + .pane { border-left: 1px solid var(--border); }
+  .pane-head { display: flex; gap: 8px; align-items: center; padding: 6px 10px; border-bottom: 1px solid var(--border); background: var(--panel); flex-wrap: wrap; }
+  .pane-head h2 { font-size: 13px; margin: 0 8px 0 0; font-weight: 600; }
+  .pane-body { flex: 1; overflow: auto; padding: 6px 10px; position: relative; }
+  .tabs button { border-radius: 6px 6px 0 0; border-bottom: none; }
+  .tabs button.active { background: var(--bg); font-weight: 600; }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .seg button { border: none; border-radius: 0; padding: 3px 9px; }
+  .seg button.active { background: var(--accent); color: #fff; }
+
+  /* trace tree */
+  .row { display: flex; align-items: baseline; gap: 6px; padding: 1px 4px; border-radius: 4px; white-space: nowrap; }
+  .row:hover { background: var(--hl2); }
+  .row.selected { outline: 1px solid var(--accent); }
+  .tw { width: 14px; display: inline-block; text-align: center; color: var(--muted); cursor: pointer; user-select: none; flex: none; }
+  .ic { width: 16px; display: inline-block; text-align: center; font-weight: 700; flex: none; }
+  .st-ok .ic, .st-cache_ok .ic, .st-skip_opt .ic { color: var(--ok); } .st-fail .ic, .st-no_dispatch .ic, .st-cache_fail .ic { color: var(--fail); }
+  .st-skip .ic { color: var(--skip); } .st-skip .lbl, .st-skip .span { opacity: 0.75; }
+  .lbl { font-weight: 600; } .lbl.anon { font-weight: 400; }
+  .lbl .kind { color: var(--muted); font-weight: 400; font-style: italic; margin-right: 4px; }
+  .rule { color: var(--accent); cursor: pointer; } .rule:hover { text-decoration: underline; }
+  .crumb { color: var(--muted); font-weight: 400; margin: 0 3px; }
+  .ell { color: var(--muted); font-weight: 400; cursor: pointer; border-bottom: 1px dashed var(--muted); }
+  .ell:hover { color: var(--fg); }
+  .chain-step { color: var(--muted); font-weight: 400; font-size: 11px; }
+  .span { color: var(--muted); } .span b { color: var(--fg); font-weight: 500; background: var(--code); padding: 0 4px; border-radius: 3px; }
+  .badge { font-size: 10px; padding: 0 5px; border-radius: 8px; border: 1px solid var(--border); color: var(--muted); }
+  .badge.cache { color: var(--cache); background: var(--cache-bg); border-color: var(--cache); }
+  .badge.fail { color: var(--fail); background: var(--fail-bg); border-color: var(--fail); }
+  .badge.ok { color: var(--ok); background: var(--ok-bg); border-color: var(--ok); }
+  .badge.alt { color: var(--accent); border-color: var(--accent); }
+  .badge.click { cursor: pointer; } .badge.click:hover { filter: brightness(1.1); text-decoration: underline; }
+  .note { color: var(--muted); font-style: italic; }
+  .kids { margin-left: 18px; border-left: 1px dotted var(--border); padding-left: 2px; }
+  .alts { margin: 2px 0 4px 36px; padding: 4px 8px; background: var(--panel); border-radius: 6px; font-size: 12px; }
+  .alts .hd { color: var(--muted); margin-bottom: 2px; }
+  .alts .alt { display: flex; gap: 8px; align-items: baseline; }
+  .alts .alt .ic { width: 14px; }
+  .alts .idx { color: var(--muted); width: 22px; text-align: right; }
+  .alts .nt { color: var(--muted); }
+  .alts .alt.chosen { font-weight: 600; }
+
+  /* flame view */
+  .flame { position: relative; font-size: 11px; }
+  .flame .axis { position: sticky; top: 0; height: 22px; background: var(--bg); z-index: 2; border-bottom: 1px solid var(--border); }
+  .flame .axis span { position: absolute; top: 2px; padding: 0 3px; border-left: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .flame .axis span.err { color: var(--fail); font-weight: 600; }
+  .flame .bar { position: absolute; height: 17px; line-height: 15px; border: 1px solid var(--bar-b); background: var(--bar); border-radius: 3px; padding: 0 4px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; cursor: pointer; }
+  .flame .bar:hover { filter: brightness(1.12); outline: 1px solid var(--accent); z-index: 1; }
+  .flame .bar.tok { background: var(--bar-tok); border-color: var(--bar-tok-b); }
+  .flame .bar.chain { border-style: double; }
+  .flame .errline { position: absolute; top: 0; bottom: 0; border-left: 2px solid var(--fail); }
+  .tip { position: fixed; z-index: 10; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; pointer-events: none; max-width: 420px; white-space: normal; box-shadow: 0 2px 10px rgba(0,0,0,0.2); }
+
+  /* parse tree */
+  .pt { white-space: nowrap; }
+  .pt .prow { padding: 1px 4px; border-radius: 4px; display: flex; gap: 6px; align-items: baseline; }
+  .pt .prow:hover { background: var(--hl2); }
+  .pt .ty { color: var(--muted); font-size: 11px; width: 80px; display: inline-block; flex: none; }
+  .pt .nm { font-weight: 600; } .pt .val { background: var(--code); padding: 0 4px; border-radius: 3px; }
+  .pt .idx { color: var(--cache); font-size: 11px; } .pt .empty { color: var(--muted); font-style: italic; }
+  .pt .col { color: var(--skip); font-size: 10px; }
+  .pt .pk { margin-left: 18px; border-left: 1px dotted var(--border); padding-left: 2px; }
+  pre.src { margin: 0; padding: 8px; background: var(--code); border-radius: 6px; white-space: pre-wrap; }
+  table.stats { border-collapse: collapse; } table.stats td, table.stats th { padding: 2px 10px 2px 0; text-align: left; }
+  table.stats th { color: var(--muted); font-weight: 500; }
+  .sqlview { white-space: pre-wrap; padding: 8px; background: var(--code); border-radius: 6px; margin-bottom: 8px; }
+  .sqlview mark { background: var(--hl); color: inherit; border-radius: 2px; }
+  .empty-msg { color: var(--muted); padding: 20px; text-align: center; }
+  .legend { color: var(--muted); font-size: 11px; margin-left: auto; display: flex; gap: 10px; }
+  .expected { gap: 6px; background: var(--panel); }
+  .expected .chip { padding: 0 6px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); }
+  .expected .chip.cls { font-style: italic; color: var(--muted); }
+  .expected .more { color: var(--accent); cursor: pointer; }
+  .verdict { padding: 0 6px; border-radius: 8px; cursor: pointer; }
+  .verdict.agree { color: var(--ok); background: var(--ok-bg); } .verdict.differ { color: var(--fail); background: var(--fail-bg); font-weight: 600; }
+  .verdict.pending { color: var(--muted); }
+  pre.json { margin: 0; padding: 8px; background: var(--code); border-radius: 6px; white-space: pre; overflow: auto; max-height: 70vh; }
+</style>
+</head>
+<body>
+<header>
+  <h1>DuckDB PEG parser visualizer</h1>
+  <span class="meta" id="grammar-meta">loading grammar…</span>
+  <span class="legend"><span><b style="color:var(--ok)">✓</b> matched</span><span><b style="color:var(--fail)">✗</b> failed</span><span><b style="color:var(--skip)">⊘</b> skipped (FIRST set)</span><span><b style="color:var(--ok)">∅</b> optional resolved empty</span><span><b style="color:var(--cache)">⟲</b> packrat cache hit</span></span>
+</header>
+<div class="sqlbox">
+  <textarea id="sql" spellcheck="false">SELECT a, count(*) FROM t WHERE x = 1 GROUP BY ALL</textarea>
+</div>
+<div class="controls">
+  <button class="primary" id="parse">Parse (⌘/Ctrl+Enter)</button>
+  <label>start rule <input type="text" id="start-rule" list="rule-list" value="Program" size="22"><datalist id="rule-list"></datalist></label>
+  <label><input type="checkbox" id="opt-packrat" checked> packrat memoization</label>
+  <label><input type="checkbox" id="opt-first" checked> FIRST-set skipping</label>
+  <label title="re-parse while typing"><input type="checkbox" id="opt-live" checked> live</label>
+  <label>examples <select id="examples">
+    <option value="">…</option>
+    <option>SELECT 1</option>
+    <option>SELECT a, count(*) FROM t WHERE x = 1 GROUP BY ALL</option>
+    <option>SELECT * FROM t JOIN u USING (id) WHERE y IN (1, 2, 3) ORDER BY 1 LIMIT 10;</option>
+    <option>CREATE TABLE t (a INTEGER PRIMARY KEY, b VARCHAR DEFAULT 'x');</option>
+    <option>INSERT INTO t VALUES (1, 'a'), (2, 'b') RETURNING *</option>
+    <option>WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n &lt; 10) SELECT * FROM c</option>
+    <option>SELECT CASE WHEN a &gt; 1 THEN 'big' ELSE 'small' END, a::INTEGER, list_transform([1,2], x -&gt; x + 1) FROM t</option>
+    <option>SELECT 'a'
+'b' AS s, $$dollar$$ FROM range(10) r(i)</option>
+    <option>SELECT 1 2</option>
+    <option>SELECT * FROM t WHERE</option>
+    <option>SELEC 1</option>
+    <option>SELECT 1; SELECT 2;</option>
+  </select></label>
+  <button class="small" id="copy-link" title="copy a link to this query and these settings">copy link</button>
+  <span class="meta" id="timing"></span>
+</div>
+<div class="tokens" id="tokens"></div>
+<div class="status-line" id="status"></div>
+<div class="status-line expected" id="expected" style="display:none"></div>
+<main>
+  <section class="pane">
+    <div class="pane-head">
+      <h2>Match trace</h2>
+      <span class="seg" id="view-seg"><button class="active" data-view="tree">tree</button><button data-view="flame">flame</button></span>
+      <label title="show anonymous sequence / choice / optional / repeat matchers as their own rows instead of folding them into the enclosing rule"><input type="checkbox" id="f-structure"> wrappers</label>
+      <label title="merge a rule with its single child when both cover exactly the same tokens (e.g. the expression precedence ladder)"><input type="checkbox" id="f-compact" checked> compact chains</label>
+      <label><input type="checkbox" id="f-fail" checked> failed</label>
+      <label><input type="checkbox" id="f-skip" checked> skipped</label>
+      <label><input type="checkbox" id="f-empty"> empty optionals</label>
+      <label><input type="checkbox" id="f-atomic" checked> tokens</label>
+      <label>find <input type="text" id="f-search" placeholder="rule name" size="12"></label>
+      <button class="small" id="exp-ok">matched / furthest path</button>
+      <button class="small" id="exp-all">expand all</button>
+      <button class="small" id="col-all">collapse all</button>
+    </div>
+    <div class="pane-body" id="trace"><div class="empty-msg">Submit a query to see how the matcher works through the grammar.</div></div>
+  </section>
+  <section class="pane">
+    <div class="pane-head tabs">
+      <button class="active" data-tab="tree">Parse tree</button>
+      <button data-tab="text">Parse tree (text)</button>
+      <button data-tab="rule">Rule</button>
+      <button data-tab="stats">Stats</button>
+      <button data-tab="duckdb">DuckDB</button>
+      <span id="pt-opts"><label title="hide CHOICE wrappers and merge single-child rules that cover the same source text"><input type="checkbox" id="pt-compact" checked> compact</label>
+      <label><input type="checkbox" id="pt-empty"> empty optionals</label></span>
+    </div>
+    <div class="pane-body" id="right"></div>
+  </section>
+</main>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  let data = null;          // last parse result
+  let children = [];        // trace id -> [child ids]
+  let reach = [];           // trace id -> furthest token index reached in its subtree
+  let expanded = new Set(); // keys of expanded view rows
+  let openChains = new Set();   // keys of chains that are shown step by step
+  let altsToggled = new Set();  // choice trace ids whose alternatives panel was toggled away from the default
+  let selectedRule = null;
+  let tab = 'tree';
+  let view = 'tree';
+  let viewRoot = null;      // view tree built from the trace with the current filters
+  let vnodeByKey = new Map();
+  const STATUS_ICON = { ok: '✓', fail: '✗', skip: '⊘', skip_opt: '∅', cache_ok: '⟲', cache_fail: '⟲', no_dispatch: '✗' };
+  const STATUS_TITLE = {
+    ok: 'matched', fail: 'failed', skip: 'not attempted: FIRST set says it cannot start with this token',
+    skip_opt: 'optional resolved to empty without attempting: element cannot start with this token',
+    cache_ok: 'packrat cache hit (matched)', cache_fail: 'packrat cache hit (failed)',
+    no_dispatch: 'literal choice: no alternative starts with this token',
+  };
+  const STATUS_SHORT = { ok: 'matched', fail: 'failed', skip: 'skipped (FIRST set)', skip_opt: 'empty (FIRST set)',
+    cache_ok: 'cache hit: matched', cache_fail: 'cache hit: failed', no_dispatch: 'no candidate alternative' };
+  const isOk = (s) => s === 'ok' || s === 'cache_ok' || s === 'skip_opt';
+  const ATOMIC = new Set(['KEYWORD', 'IDENTIFIER', 'NUMBER_LITERAL', 'STRING_LITERAL', 'OPERATOR', 'END_OF_INPUT']);
+
+  // ---------------------------------------------------------------- backend: local server or in-browser Pyodide
+  const postJson = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json());
+  function serverBackend() {
+    return {
+      grammar: () => fetch('/api/grammar').then(r => r.json()),
+      rule: (name) => fetch('/api/rule/' + encodeURIComponent(name)).then(r => r.json()),
+      parse: (body) => postJson('/api/parse', body),
+      duckdb: (sql) => postJson('/api/duckdb', { sql }),
+    };
+  }
+  function staticBackend(cfg) {
+    let ready = null;
+    const init = () => ready || (ready = (async () => {
+      $('grammar-meta').textContent = 'loading the Python runtime (Pyodide, ~10 MB on first visit)…';
+      await new Promise((res, rej) => { const sc = document.createElement('script'); sc.src = cfg.pyodide + 'pyodide.js'; sc.onload = res; sc.onerror = rej; document.head.appendChild(sc); });
+      const py = await loadPyodide({ indexURL: cfg.pyodide });
+      for (const m of cfg.modules) py.FS.writeFile(m, await (await fetch(m)).text());
+      py.globals.set('grammar_text', await (await fetch(cfg.grammar)).text());
+      py.runPython('import sys; sys.path.insert(0, "."); import peg_static');
+      const info = JSON.parse(py.runPython(`peg_static.load_grammar(grammar_text, ${JSON.stringify(cfg.grammar_name)})`));
+      info.source = cfg.grammar_name + ' (parsed in your browser with Pyodide)';
+      return { py, info };
+    })());
+    const call = async (kind, body) => { const { py } = await init(); return JSON.parse(py.globals.get('peg_static').api(kind, JSON.stringify(body))); };
+    return {
+      grammar: async () => (await init()).info,
+      rule: (name) => call('rule', { name }),
+      parse: (body) => call('parse', body),
+      duckdb: () => Promise.resolve({ available: false, static: true }),
+    };
+  }
+  const backend = window.PEG_STATIC ? staticBackend(window.PEG_STATIC) : serverBackend();
+  backend.grammar().then(g => {
+    $('grammar-meta').textContent = `${g.rule_count} rules, ${g.keyword_count} keywords — ${g.source}`;
+    const dl = $('rule-list');
+    g.rules.forEach(r => { const o = document.createElement('option'); o.value = r; dl.appendChild(o); });
+  }).catch(e => { $('grammar-meta').textContent = 'failed to load the grammar: ' + e; });
+
+  // ---------------------------------------------------------------- permalink (#q=...&r=rule&np=1&nf=1)
+  function readHash() {
+    const h = new URLSearchParams(location.hash.replace(/^#/, ''));
+    if (h.has('q')) $('sql').value = h.get('q');
+    if (h.has('r')) $('start-rule').value = h.get('r');
+    if (h.get('np') === '1') $('opt-packrat').checked = false;
+    if (h.get('nf') === '1') $('opt-first').checked = false;
+  }
+  function writeHash() {
+    const h = new URLSearchParams();
+    h.set('q', $('sql').value);
+    if (($('start-rule').value || 'Program') !== 'Program') h.set('r', $('start-rule').value);
+    if (!$('opt-packrat').checked) h.set('np', '1');
+    if (!$('opt-first').checked) h.set('nf', '1');
+    history.replaceState(null, '', '#' + h.toString());
+  }
+
+  function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+  function row(id) { return data.trace[id]; }
+  function matcherOf(id) { return data.matchers[String(row(id)[2])]; }
+  const st = (id) => row(id)[6];
+
+  // ---------------------------------------------------------------- parsing
+  let requestSeq = 0;
+  let liveTimer = null;
+  function scheduleParse() {
+    if (!$('opt-live').checked) return;
+    clearTimeout(liveTimer);
+    liveTimer = setTimeout(parse, 150);
+  }
+  async function parse() {
+    clearTimeout(liveTimer);
+    const sql = $('sql').value;
+    const seq = ++requestSeq;
+    $('timing').textContent = 'parsing…';
+    let result;
+    writeHash();
+    try {
+      result = await backend.parse({ sql, start_rule: $('start-rule').value || 'Program',
+        packrat: $('opt-packrat').checked, first_set_skip: $('opt-first').checked });
+    } catch (e) {
+      if (seq === requestSeq) $('timing').textContent = window.PEG_STATIC ? 'parser failed: ' + e : 'server unreachable';
+      return;
+    }
+    if (seq !== requestSeq) return; // a newer request is in flight, drop this stale result
+    data = result;
+    data.duckdb = null;
+    backend.duckdb(sql).then(d => { if (seq === requestSeq && data) { data.duckdb = d; renderStatus(); if (tab === 'duckdb') renderRight(); } });
+    if (data.error && data.error.stage !== 'parser') {
+      $('timing').textContent = '';
+      $('status').innerHTML = `<span class="fail">${esc(data.error.message)}</span>`;
+      $('expected').style.display = 'none';
+      $('trace').innerHTML = ''; $('right').innerHTML = '';
+      renderTokens();
+      return;
+    }
+    $('timing').textContent = `${data.elapsed_ms} ms · ${data.trace.length.toLocaleString()} attempts` + (data.truncated ? ' (trace truncated)' : '');
+    children = [];
+    for (const r of data.trace) children[r[0]] = [];
+    for (const r of data.trace) if (r[1] >= 0 && children[r[1]]) children[r[1]].push(r[0]);
+    reach = new Array(data.trace.length).fill(0);
+    for (let i = data.trace.length - 1; i >= 0; i--) {
+      const r = data.trace[i];
+      reach[i] = Math.max(reach[i], r[4], r[5] === null ? r[4] : r[5]);
+      if (r[1] >= 0) reach[r[1]] = Math.max(reach[r[1]], reach[i]);
+    }
+    openChains = new Set(); altsToggled = new Set();
+    defaultExpansion();
+    renderTokens();
+    renderStatus();
+    renderTrace();
+    renderRight();
+  }
+
+  // ---------------------------------------------------------------- tokens / status
+  function renderTokens() {
+    const el = $('tokens');
+    el.innerHTML = '';
+    if (!data || !data.tokens) return;
+    const errTok = data.error && data.error.stage === 'parser' ? data.error.token : -1;
+    data.tokens.forEach((t, i) => {
+      const d = document.createElement('span');
+      d.className = 'tok ' + t.type + (i === errTok ? ' err' : '');
+      d.dataset.i = i;
+      d.innerHTML = `<span class="mono">${esc(t.text) || '⏎'}</span><span class="ty">${i}·${t.type.toLowerCase().replace('_literal', '').replace('end_of_input', 'eoi')}</span>`;
+      d.title = `token ${i}: ${t.type} at offset ${t.offset}, length ${t.length}`;
+      el.appendChild(d);
+    });
+  }
+  function highlightTokens(start, end) {
+    document.querySelectorAll('.tok').forEach(t => {
+      const i = +t.dataset.i;
+      t.classList.toggle('hl', end !== null && end !== undefined ? (i >= start && i < end) : i === start);
+    });
+  }
+  function renderStatus() {
+    const s = data.stats;
+    const msg = data.success && data.consumed_all ? `<span class="ok">✓ parsed successfully</span>` : `<span class="fail">✗ ${esc(data.error ? data.error.message : 'no match')}</span>`;
+    $('status').innerHTML = `${msg}<span>start rule <b>${esc(data.start_rule)}</b></span>` +
+      `<span>${s.attempts.toLocaleString()} attempts · <span class="ok">${s.ok.toLocaleString()} ok</span> · <span class="fail">${s.fail.toLocaleString()} failed</span> · <span class="warn">${s.skip.toLocaleString()} skipped by FIRST set</span> · ${s.cache_hits.toLocaleString()} cache hits · ${s.no_dispatch.toLocaleString()} literal choices with no candidate</span>` +
+      `<span>furthest token reached: ${data.max_token}</span>` + verdictHtml() + (data.grammar_reload_error ? `<span class="fail">grammar reload failed: ${esc(data.grammar_reload_error)}</span>` : '');
+    const v = $('status').querySelector('.verdict');
+    if (v) v.addEventListener('click', () => switchTab('duckdb'));
+    renderExpected();
+  }
+
+  function ourVerdict() { return !!(data.success && data.consumed_all); }
+  function verdictHtml() {
+    const d = data.duckdb;
+    if (d === null) return '<span class="verdict pending">DuckDB: checking…</span>';
+    if (!d || !d.available) return '';
+    if (d.parsed === null) return `<span class="verdict pending" title="${esc(d.error || '')}">DuckDB: no verdict</span>`;
+    if (d.parsed === ourVerdict()) return `<span class="verdict agree" title="the real DuckDB parser gives the same result">DuckDB agrees ✓</span>`;
+    return `<span class="verdict differ" title="click for details">⚠ DuckDB differs: ${esc(d.parsed ? 'it parses this query' : d.error)}</span>`;
+  }
+
+  let expectedAll = false;
+  function renderExpected() {
+    const el = $('expected');
+    const x = data.expected;
+    if (!x || ourVerdict()) { el.style.display = 'none'; return; }
+    el.style.display = '';
+    const prev = x.position > 0 ? data.tokens[x.position - 1] : null;
+    const where = x.token ? `at <b class="mono">${esc(x.token)}</b>` : 'at the end of the input';
+    const after = prev && prev.text ? ` (after <b class="mono">${esc(prev.text)}</b>)` : '';
+    const LIMIT = 24;
+    const kws = expectedAll ? x.keywords : x.keywords.slice(0, LIMIT);
+    let html = `<span>Token ${x.position} ${where}${after}: the grammar accepted</span>`;
+    html += x.classes.map(c => `<span class="chip cls">${esc(c)}</span>`).join('');
+    html += kws.map(k => `<span class="chip mono">${esc(k)}</span>`).join('');
+    if (x.keywords.length > LIMIT && !expectedAll) html += `<span class="more" data-more="1">+${x.keywords.length - LIMIT} more</span>`;
+    if (!x.keywords.length && !x.classes.length) html += '<span class="meta">nothing (no matcher was tried at this token)</span>';
+    if (x.rules.length) html += `<span class="meta" title="${esc(x.rules.join(', '))}">· ${x.rules.length} rule${x.rules.length > 1 ? 's' : ''} attempted here: ${esc(x.rules.slice(0, 6).join(', '))}${x.rules.length > 6 ? ', …' : ''}</span>`;
+    el.innerHTML = html;
+    const more = el.querySelector('[data-more]');
+    if (more) more.addEventListener('click', () => { expectedAll = true; renderExpected(); });
+  }
+
+  function switchTab(name) {
+    tab = name;
+    document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('active', x.dataset.tab === name));
+    renderRight();
+  }
+
+  // ---------------------------------------------------------------- view tree
+  // A view node (vnode) is one row of the trace tree: a chain of trace ids (outermost first) merged into one
+  // breadcrumb, its visible children, the choice alternative it was reached through, and the anonymous choices
+  // that were folded into it (so their alternatives can still be listed).
+  function filters() {
+    return { structure: $('f-structure').checked, compact: $('f-compact').checked, fail: $('f-fail').checked,
+      skip: $('f-skip').checked, empty: $('f-empty').checked, atomic: $('f-atomic').checked,
+      search: $('f-search').value.trim().toLowerCase() };
+  }
+
+  function statusVisible(id, f) {
+    const s = st(id);
+    if (!f.fail && (s === 'fail' || s === 'cache_fail' || s === 'no_dispatch')) return false;
+    if (!f.skip && (s === 'skip' || s === 'skip_opt')) return false;
+    return true;
+  }
+
+  function mkNode(id, kids, choices) {
+    return { ids: [id], kids, alt: null, alts: [], choices, key: id };
+  }
+
+  // Appends the view nodes for trace node `id` to `out`. Folded wrappers contribute their children instead; a
+  // folded choice is registered in `folded` so the enclosing row can list its alternatives.
+  function collect(id, f, out, folded) {
+    const m = matcherOf(id);
+    const s = st(id);
+    if (!statusVisible(id, f)) return;
+    const anon = !m.name;
+    const atomic = ATOMIC.has(m.kind);
+    if (atomic && anon && !f.atomic) return;
+    const kids = [];
+    const myFolded = [];
+    const fold = anon && !atomic && !f.structure;
+    if (m.kind === 'CHOICE') {
+      // with the alternatives panel open, alternatives that failed without trying anything are only listed there
+      const panel = fold && altsOpen(id);
+      for (const c of children[id] || []) {
+        if (panel && !isOk(st(c)) && !(children[c] || []).length) continue;
+        const before = kids.length;
+        collect(c, f, kids, myFolded);
+        if (kids.length > before) kids[before].alt = { i: row(c)[3], n: m.alts.length, literal: !!m.literal, choice: id };
+      }
+      if (!fold) myFolded.unshift(id);
+    } else {
+      for (const c of children[id] || []) collect(c, f, kids, myFolded);
+    }
+    if (fold) {
+      if (m.kind === 'CHOICE') {
+        if (kids.length === 0 && s === 'no_dispatch') { out.push(mkNode(id, kids, [id])); return; }
+        folded.push(id);
+      } else if (kids.length === 0 && m.kind === 'OPTIONAL' && f.empty && isOk(s)) {
+        out.push(mkNode(id, kids, []));
+        return;
+      }
+      folded.push(...myFolded);
+      out.push(...kids);
+      return;
+    }
+    out.push(mkNode(id, kids, myFolded));
+  }
+
+  // Chain compaction: a named rule with exactly one child covering the same tokens becomes one breadcrumb row.
+  function compact(v, f) {
+    if (f.compact && !openChains.has(v.key)) {
+      while (v.kids.length === 1) {
+        const k = v.kids[0];
+        const lastId = v.ids[v.ids.length - 1];
+        const a = row(lastId), b = row(k.ids[0]);
+        const ma = matcherOf(lastId), mb = matcherOf(k.ids[0]);
+        const sameSpan = a[4] === b[4] && a[5] === b[5] && reach[lastId] === reach[k.ids[0]];
+        if (!(sameSpan && isOk(a[6]) === isOk(b[6]) && ma.name && (mb.name || ATOMIC.has(mb.kind)))) break;
+        if (openChains.has(k.key)) break;
+        v.ids.push(...k.ids);
+        v.choices.push(...k.choices);
+        if (k.alt) v.alts.push(k.alt);
+        v.alts.push(...k.alts);
+        v.kids = k.kids;
+      }
+    }
+    vnodeByKey.set(v.key, v);
+    for (const k of v.kids) compact(k, f);
+    return v;
+  }
+
+  function buildView() {
+    const f = filters();
+    vnodeByKey = new Map();
+    const roots = [];
+    collect(0, f, roots, []);
+    viewRoot = roots[0] || null;
+    if (viewRoot) compact(viewRoot, f);
+  }
+
+  function defaultExpansion() {
+    expanded = new Set();
+    buildView();
+    const target = data.max_token;
+    const failing = !(data.success && data.consumed_all);
+    const walk = (v) => {
+      const s = st(v.ids[0]);
+      if (v.kids.length && (isOk(s) || (failing && reach[v.ids[0]] >= target))) expanded.add(v.key);
+      v.kids.forEach(walk);
+    };
+    if (viewRoot) walk(viewRoot);
+  }
+
+  // ---------------------------------------------------------------- trace tree rendering
+  function renderTrace() {
+    buildView();
+    const root = $('trace');
+    root.innerHTML = '';
+    document.querySelectorAll('.tip').forEach(t => t.remove());
+    if (!viewRoot) { root.innerHTML = '<div class="empty-msg">nothing to show with the current filters</div>'; return; }
+    if (view === 'flame') { renderFlame(root); return; }
+    const f = filters();
+    if (f.search) {
+      const mark = (v, path) => {
+        if (v.ids.some(id => (matcherOf(id).name || '').toLowerCase().includes(f.search))) path.forEach(k => expanded.add(k));
+        v.kids.forEach(k => mark(k, path.concat([v.key])));
+      };
+      mark(viewRoot, []);
+    }
+    root.appendChild(renderV(viewRoot));
+  }
+
+  function spanText(start, end) {
+    if (end === null || end === undefined || end <= start) return '';
+    return data.tokens.slice(start, end).map(t => t.text).join(' ');
+  }
+
+  function nameHtml(id) {
+    const m = matcherOf(id);
+    if (m.name) return `<span class="rule" data-rule="${esc(m.name)}">${esc(m.name)}</span>`;
+    return `<span class="kind">${m.kind.toLowerCase()}</span><span class="mono">${esc(m.label)}</span>`;
+  }
+
+  function altBadge(a) {
+    return `<span class="badge alt" title="alternative ${a.i} of ${a.n} in the enclosing ${a.literal ? 'literal ' : ''}choice">alt ${a.i}/${a.n}</span>`;
+  }
+
+  // alternatives panel is open by default when the choice had to try more than one alternative
+  function altsOpen(cid) {
+    const tried = (children[cid] || []).length;
+    const dflt = tried > 1 || st(cid) === 'no_dispatch';
+    return altsToggled.has(cid) ? !dflt : dflt;
+  }
+
+  function renderV(v) {
+    const first = v.ids[0], last = v.ids[v.ids.length - 1];
+    const r = row(first), rl = row(last);
+    const s = st(first);
+    const wrap = document.createElement('div');
+    wrap.className = 'node st-' + s;
+    wrap.dataset.key = v.key;
+    const hasKids = v.kids.length > 0;
+    const isExp = expanded.has(v.key);
+    const rowEl = document.createElement('div');
+    rowEl.className = 'row';
+    let html = `<span class="tw">${hasKids ? (isExp ? '▾' : '▸') : '·'}</span>`;
+    html += `<span class="ic" title="${esc(STATUS_TITLE[s] || s)}">${STATUS_ICON[s] || '?'}</span>`;
+    const anon = !matcherOf(first).name;
+    html += `<span class="lbl${anon ? ' anon' : ''}">`;
+    if (v.ids.length <= 4) {
+      html += v.ids.map(nameHtml).join('<span class="crumb">›</span>');
+    } else {
+      const title = v.ids.map(id => matcherOf(id).name || matcherOf(id).label).join(' › ');
+      html += nameHtml(first) + '<span class="crumb">›</span>' +
+        `<span class="ell" data-chain="1" title="${esc(title)}">${v.ids.length - 2} rules</span>` +
+        '<span class="crumb">›</span>' + nameHtml(last);
+    }
+    if (v.ids.length > 1) html += ` <span class="ell chain-step" data-chain="1" title="show the ${v.ids.length} merged rules as separate rows">⤵</span>`;
+    html += '</span>';
+    const txt = spanText(r[4], rl[5]);
+    html += `<span class="span">@${r[4]}`;
+    if (txt) html += ` <b class="mono">${esc(txt.length > 90 ? txt.slice(0, 90) + '…' : txt)}</b>`;
+    else if (isOk(s)) html += ' <i>(empty)</i>';
+    html += '</span>';
+    if (v.alt) html += altBadge(v.alt);
+    for (const cid of v.choices) {
+      const cm = matcherOf(cid); const tried = (children[cid] || []).length; const cs = st(cid);
+      html += `<span class="badge click ${isOk(cs) ? 'ok' : 'fail'}" data-choice="${cid}" title="click to ${altsOpen(cid) ? 'hide' : 'show'} the alternatives of this choice">${cm.literal ? 'literal choice' : 'choice'} ${tried}/${cm.alts.length} tried${isOk(cs) ? '' : ', failed'}</span>`;
+    }
+    if (s === 'cache_ok' || s === 'cache_fail') html += '<span class="badge cache">cache hit</span>';
+    else if (v.ids.some(id => matcherOf(id).memo)) html += '<span class="badge" title="result is stored in the packrat cache">memo</span>';
+    if (!isOk(s) && s !== 'skip' && reach[first] > r[4]) html += `<span class="badge fail" title="furthest token index any attempt in this subtree reached">reached token ${reach[first]}</span>`;
+    const notes = v.ids.map(id => row(id)[8]).filter(Boolean);
+    if (notes.length) html += `<span class="note">— ${esc(notes.join('; '))}</span>`;
+    rowEl.innerHTML = html;
+    rowEl.querySelector('.tw').addEventListener('click', (e) => { e.stopPropagation(); toggleRow(v.key, wrap); });
+    rowEl.addEventListener('click', (e) => {
+      const t = e.target;
+      if (t.classList.contains('rule')) { showRule(t.dataset.rule); return; }
+      if (t.dataset.chain !== undefined) { v.ids.forEach(id => { openChains.add(id); expanded.add(id); }); renderTrace(); return; }
+      if (t.dataset.choice !== undefined) {
+        const cid = +t.dataset.choice;
+        if (altsToggled.has(cid)) altsToggled.delete(cid); else altsToggled.add(cid);
+        renderTrace(); return;
+      }
+      if (hasKids) toggleRow(v.key, wrap);
+      document.querySelectorAll('.row.selected').forEach(x => x.classList.remove('selected'));
+      rowEl.classList.add('selected');
+    });
+    rowEl.addEventListener('mouseenter', () => highlightTokens(r[4], rl[5]));
+    rowEl.addEventListener('mouseleave', () => highlightTokens(-1, -1));
+    wrap.appendChild(rowEl);
+    if (isExp || !hasKids) for (const cid of v.choices) if (altsOpen(cid)) wrap.appendChild(renderAlts(cid));
+    if (isExp && hasKids) {
+      const box = document.createElement('div'); box.className = 'kids';
+      for (const k of v.kids) box.appendChild(renderV(k));
+      wrap.appendChild(box);
+    }
+    return wrap;
+  }
+
+  function renderAlts(cid) {
+    const m = matcherOf(cid);
+    const kids = children[cid] || [];
+    const box = document.createElement('div');
+    box.className = 'alts';
+    const byAlt = new Map();
+    for (const k of kids) byAlt.set(row(k)[3], k);
+    const parentOk = isOk(st(cid));
+    const ctx = row(cid)[1] >= 0 ? matcherOf(row(cid)[1]) : null;
+    box.innerHTML = `<div class="hd">${m.literal ? 'literal choice' : 'choice'} at token ${row(cid)[4]}${ctx && ctx.name ? ' in ' + esc(ctx.name) : ''}: <span class="mono">${esc(m.desc.length > 120 ? m.desc.slice(0, 120) + '…' : m.desc)}</span></div>`;
+    const notTried = [];
+    const showAll = altsToggled.has('all' + cid);
+    m.alts.forEach((aid, i) => {
+      const am = data.matchers[String(aid)];
+      const k = byAlt.get(i);
+      const nm = am.name ? `<span class="rule" data-rule="${esc(am.name)}">${esc(am.name)}</span>` : `<span class="mono">${esc(am.label)}</span>`;
+      if (k === undefined && !showAll) { notTried.push(am.name || am.label); return; }
+      const line = document.createElement('div');
+      let txt = 'not tried', icon = '–', cls = 'nt';
+      if (k !== undefined) {
+        const s = st(k); txt = STATUS_SHORT[s]; icon = STATUS_ICON[s]; cls = 'st-' + s;
+        if (!isOk(s) && reach[k] > row(k)[4]) txt += `, reached token ${reach[k]}`;
+      }
+      const chosen = k !== undefined && isOk(st(k)) && parentOk;
+      line.className = 'alt ' + cls + (chosen ? ' chosen' : '');
+      line.innerHTML = `<span class="idx">${i}</span><span class="ic">${icon}</span>${nm}<span class="nt">${esc(txt)}</span>`;
+      line.querySelectorAll('.rule').forEach(el => el.addEventListener('click', (e) => { e.stopPropagation(); showRule(el.dataset.rule); }));
+      box.appendChild(line);
+    });
+    if (notTried.length) {
+      const line = document.createElement('div'); line.className = 'alt nt';
+      const preview = notTried.slice(0, 3).join(', ') + (notTried.length > 3 ? ', …' : '');
+      line.innerHTML = `<span class="idx"></span><span class="ic">–</span><span class="ell" title="click to list them">${notTried.length} later alternative${notTried.length > 1 ? 's' : ''} not tried</span><span class="nt">${esc(preview)}</span>`;
+      line.querySelector('.ell').addEventListener('click', (e) => { e.stopPropagation(); altsToggled.add('all' + cid); renderTrace(); });
+      box.appendChild(line);
+    }
+    if (m.literal) {
+      const n = document.createElement('div'); n.className = 'nt';
+      n.textContent = 'all alternatives are keywords: DuckDB looks up the current token and tries at most one alternative';
+      box.appendChild(n);
+    }
+    return box;
+  }
+
+  function toggleRow(key, wrap) {
+    if (expanded.has(key)) expanded.delete(key); else expanded.add(key);
+    rerender(key, wrap);
+  }
+  function rerender(key, wrap) {
+    const v = vnodeByKey.get(key);
+    if (v) wrap.replaceWith(renderV(v));
+  }
+
+  // ---------------------------------------------------------------- flame view
+  function renderFlame(root) {
+    const n = data.tokens.length;
+    const avail = Math.max(600, root.clientWidth - 24);
+    const TW = Math.max(56, Math.min(160, Math.floor(avail / Math.max(1, n))));
+    const RH = 19;
+    const box = document.createElement('div');
+    box.className = 'flame';
+    box.style.width = (n * TW + 8) + 'px';
+    const axis = document.createElement('div'); axis.className = 'axis';
+    const errTok = data.error && data.error.stage === 'parser' ? data.error.token : -1;
+    data.tokens.forEach((t, i) => {
+      const s = document.createElement('span'); s.style.left = (i * TW) + 'px'; s.style.width = TW + 'px';
+      s.className = i === errTok ? 'err' : ''; s.textContent = t.text || '⏎'; s.title = `token ${i}: ${t.type}`;
+      axis.appendChild(s);
+    });
+    box.appendChild(axis);
+    let maxDepth = 0;
+    const bars = [];
+    const walk = (v, depth) => {
+      const first = v.ids[0], last = v.ids[v.ids.length - 1];
+      const r = row(first), rl = row(last);
+      let nextDepth = depth;
+      if (isOk(st(first)) && rl[5] !== null && rl[5] > r[4]) {
+        bars.push({ v, depth, start: r[4], end: rl[5] });
+        nextDepth = depth + 1;
+        maxDepth = Math.max(maxDepth, depth);
+      }
+      v.kids.forEach(k => walk(k, nextDepth));
+    };
+    walk(viewRoot, 0);
+    const tip = document.createElement('div'); tip.className = 'tip'; tip.style.display = 'none';
+    document.body.appendChild(tip);
+    for (const b of bars) {
+      const m = matcherOf(b.v.ids[b.v.ids.length - 1]);
+      const el = document.createElement('div');
+      el.className = 'bar' + (ATOMIC.has(m.kind) && !m.name ? ' tok' : '') + (b.v.ids.length > 1 ? ' chain' : '');
+      el.style.left = (b.start * TW) + 'px'; el.style.width = ((b.end - b.start) * TW - 2) + 'px';
+      el.style.top = (26 + b.depth * RH) + 'px';
+      const names = b.v.ids.map(id => matcherOf(id).name || matcherOf(id).label);
+      el.textContent = names.length > 2 ? `${names[0]} › … › ${names[names.length - 1]}` : names.join(' › ');
+      el.addEventListener('mouseenter', () => {
+        highlightTokens(b.start, b.end);
+        tip.style.display = 'block';
+        tip.innerHTML = `<div>${names.map(esc).join(' <span class="crumb">›</span> ')}</div><div class="meta">tokens ${b.start}–${b.end - 1}: <span class="mono">${esc(spanText(b.start, b.end).slice(0, 160))}</span></div><div class="meta">click to open in the tree view</div>`;
+      });
+      el.addEventListener('mousemove', (e) => { tip.style.left = (e.clientX + 12) + 'px'; tip.style.top = (e.clientY + 12) + 'px'; });
+      el.addEventListener('mouseleave', () => { highlightTokens(-1, -1); tip.style.display = 'none'; });
+      el.addEventListener('click', () => {
+        tip.remove();
+        view = 'tree'; setSeg();
+        let id = row(b.v.ids[0])[1];
+        while (id >= 0) { const pv = findVnodeContaining(id); if (pv) expanded.add(pv.key); id = row(id)[1]; }
+        renderTrace();
+        const target = document.querySelector(`#trace .node[data-key="${b.v.key}"] > .row`);
+        if (target) { target.scrollIntoView({ block: 'center' }); target.classList.add('selected'); }
+      });
+      box.appendChild(el);
+    }
+    if (errTok >= 0) { const l = document.createElement('div'); l.className = 'errline'; l.style.left = (errTok * TW) + 'px'; box.appendChild(l); }
+    box.style.height = (30 + (maxDepth + 1) * RH) + 'px';
+    root.appendChild(box);
+    const note = document.createElement('p'); note.className = 'meta';
+    note.textContent = 'Each bar is a matched rule (or a chain of rules, double border) covering the tokens above it; nesting grows downwards. Failed attempts are not drawn; the red line marks the error position.';
+    root.appendChild(note);
+  }
+  function findVnodeContaining(id) { for (const v of vnodeByKey.values()) if (v.ids.includes(id)) return v; return null; }
+  function setSeg() { document.querySelectorAll('#view-seg button').forEach(b => b.classList.toggle('active', b.dataset.view === view)); }
+
+  // ---------------------------------------------------------------- right pane
+  function renderRight() {
+    const el = $('right');
+    el.innerHTML = '';
+    $('pt-opts').style.display = tab === 'tree' ? '' : 'none';
+    if (!data) return;
+    if (tab === 'tree') {
+      if (!data.tree) { el.innerHTML = '<div class="empty-msg">no parse result</div>'; return; }
+      el.appendChild(renderSqlView());
+      const box = document.createElement('div'); box.className = 'pt';
+      box.appendChild(renderPT(data.tree, { empty: $('pt-empty').checked, compact: $('pt-compact').checked }, null));
+      el.appendChild(box);
+    } else if (tab === 'text') {
+      const pre = document.createElement('pre'); pre.className = 'src'; pre.textContent = data.tree_text || '(no result)';
+      el.appendChild(pre);
+    } else if (tab === 'rule') {
+      if (!selectedRule) { el.innerHTML = '<div class="empty-msg">click a rule name in the trace to see its grammar definition</div>'; return; }
+      backend.rule(selectedRule).then(j => {
+        const m = Object.values(data.matchers).find(x => x.name === selectedRule);
+        el.innerHTML = `<p><b>${esc(j.name || selectedRule)}</b> <span class="meta">${j.line ? 'line ' + j.line : ''}${m && m.memo ? ' · packrat memoized' : ''}${m && m.collapsible ? ' · collapsible' : ''}</span></p>` +
+          `<pre class="src">${esc(j.source || j.error || '')}</pre>` +
+          (m && m.kind !== 'LIST' ? `<p class="meta">This rule is implemented by a built-in matcher (${esc(m.kind)}), the grammar body above is not expanded.</p>` : '');
+        const stat = usageStats(selectedRule);
+        el.innerHTML += `<p class="meta">attempts in this parse: ${stat.n} (${stat.ok} matched, ${stat.fail} failed, ${stat.skip} skipped, ${stat.cache} cache hits)</p>`;
+      });
+    } else if (tab === 'stats') {
+      el.appendChild(renderStats());
+    } else if (tab === 'duckdb') {
+      el.appendChild(renderDuckDB());
+    }
+  }
+
+  function renderDuckDB() {
+    const w = document.createElement('div');
+    const d = data.duckdb;
+    if (d === null) { w.innerHTML = '<div class="empty-msg">running the query through the duckdb binary…</div>'; return w; }
+    if (!d.available) {
+      w.innerHTML = d.static
+        ? '<div class="empty-msg">The cross-check against the real DuckDB parser needs the local server with a duckdb build; it is not available in the static (in-browser) build.</div>'
+        : '<div class="empty-msg">No duckdb binary found. Build DuckDB (e.g. <code>make reldebug</code>) or start the server with <code>--duckdb /path/to/duckdb</code>.</div>';
+      return w;
+    }
+    const ours = ourVerdict();
+    let html = `<p class="meta">binary: <span class="mono">${esc(d.binary)}</span> · runs the query in an in-memory database with file system access disabled, then classifies the outcome</p>`;
+    html += `<p>Visualizer: <b>${ours ? 'parses' : 'syntax error'}</b>${!ours && data.error ? ` (${esc(data.error.message)})` : ''}<br>DuckDB: <b>${d.parsed === null ? 'no verdict' : d.parsed ? 'parses' : 'syntax error'}</b>${d.error ? ` (${esc(d.error)})` : ''}${d.later_error ? ` — then failed after parsing: <span class="mono">${esc(d.later_error)}</span>` : ''}</p>`;
+    if (d.parsed !== null && d.parsed !== ours) html += '<p class="fail" style="color:var(--fail)">⚠ The verdicts differ: either the Python mirror of the matcher deviates from the C++ one, or the transformer rejected a statement the grammar accepts.</p>';
+    if (d.detail) html += `<pre class="src">${esc(d.detail)}</pre>`;
+    if (d.ast) html += `<p class="meta">SQLStatement produced by DuckDB (json_serialize_sql):</p><pre class="json">${esc(JSON.stringify(d.ast, null, 1))}</pre>`;
+    else if (d.ast_error) html += `<p class="meta">AST not available: ${esc(d.ast_error)}</p>`;
+    w.innerHTML = html;
+    return w;
+  }
+
+  function renderSqlView() {
+    const d = document.createElement('div'); d.className = 'sqlview mono'; d.id = 'sqlview';
+    d.textContent = data.sql; return d;
+  }
+  function highlightSql(o, l) {
+    const d = $('sqlview'); if (!d) return;
+    if (o === null || o === undefined) { d.textContent = data.sql; return; }
+    const s = data.sql;
+    d.innerHTML = esc(s.slice(0, o)) + '<mark>' + esc(s.slice(o, o + l)) + '</mark>' + esc(s.slice(o + l));
+  }
+
+  // Parse tree row. In compact mode CHOICE wrappers are hidden (their index becomes a badge on the child), optionals
+  // with a value show their child, and single-child rules covering the same source text merge into one breadcrumb.
+  function renderPT(n, o, altIdx) {
+    if (n.t === 'OPTIONAL' && n.c) return renderPT(n.c[0], o, altIdx);
+    if (o.compact && n.t === 'CHOICE') return renderPT(n.c[0], o, n.i);
+    const chain = [n];
+    let cur = n;
+    if (o.compact) {
+      while ((cur.t === 'LIST' || cur.t === 'REPEAT') && cur.c) {
+        const vis = cur.c.filter(c => o.empty || !(c.t === 'OPTIONAL' && !c.c));
+        if (vis.length !== 1) break;
+        let k = vis[0];
+        while (k.t === 'OPTIONAL' && k.c) k = k.c[0];
+        if (k.t === 'CHOICE') { if (altIdx === null) altIdx = k.i; k = k.c[0]; }
+        if (k.o !== cur.o || k.l !== cur.l) break;
+        chain.push(k); cur = k;
+      }
+    }
+    const wrap = document.createElement('div');
+    const r = document.createElement('div'); r.className = 'prow';
+    let html = `<span class="ty">${cur.t}</span>`;
+    if (cur.t === 'OPTIONAL' && !cur.c) html += '<span class="empty">[empty]</span>';
+    const named = chain.filter(x => x.n);
+    if (named.length > 4) {
+      const hid = named.slice(1, -1).map(x => x.n).join(' › ');
+      html += `<span class="nm rule" data-rule="${esc(named[0].n)}">${esc(named[0].n)}</span><span class="crumb">›</span><span class="ell" title="${esc(hid)}">${named.length - 2} rules</span><span class="crumb">›</span><span class="nm rule" data-rule="${esc(named[named.length - 1].n)}">${esc(named[named.length - 1].n)}</span>`;
+    } else if (named.length) {
+      html += named.map(x => `<span class="nm rule" data-rule="${esc(x.n)}">${esc(x.n)}</span>`).join('<span class="crumb">›</span>');
+    } else if (cur.t === 'LIST') html += '<span class="empty">( … )</span>';
+    if (altIdx !== null && altIdx !== undefined) html += `<span class="idx" title="selected alternative of the enclosing choice">alt ${altIdx}</span>`;
+    if (cur.v !== undefined) html += `<span class="val mono">${esc(cur.v)}</span>`;
+    if (cur.c && (cur.t === 'LIST' || cur.t === 'REPEAT')) html += `<span class="empty">${cur.c.length} children</span>`;
+    if (chain.some(x => x.col)) html += '<span class="col" title="forwarded by a collapsible parent rule">collapsed</span>';
+    r.innerHTML = html;
+    r.addEventListener('mouseenter', () => highlightSql(cur.o, cur.l));
+    r.addEventListener('mouseleave', () => highlightSql(null));
+    r.querySelectorAll('.rule').forEach(el => el.addEventListener('click', () => showRule(el.dataset.rule)));
+    wrap.appendChild(r);
+    if (cur.c && (cur.t === 'LIST' || cur.t === 'REPEAT')) {
+      const k = document.createElement('div'); k.className = 'pk';
+      for (const c of cur.c) {
+        if (!o.empty && c.t === 'OPTIONAL' && !c.c) continue;
+        k.appendChild(renderPT(c, o, null));
+      }
+      wrap.appendChild(k);
+    } else if (cur.c && cur.t === 'CHOICE') {
+      const k = document.createElement('div'); k.className = 'pk';
+      k.appendChild(renderPT(cur.c[0], o, null));
+      wrap.appendChild(k);
+    }
+    return wrap;
+  }
+
+  function usageStats(name) {
+    const s = { n: 0, ok: 0, fail: 0, skip: 0, cache: 0 };
+    for (const r of data.trace) {
+      const m = data.matchers[String(r[2])];
+      if (m.name !== name) continue;
+      s.n++;
+      const x = r[6];
+      if (x === 'cache_ok' || x === 'cache_fail') s.cache++;
+      else if (x === 'skip' || x === 'skip_opt') s.skip++;
+      else if (isOk(x)) s.ok++; else s.fail++;
+    }
+    return s;
+  }
+
+  function renderStats() {
+    const per = new Map();
+    for (const r of data.trace) {
+      const m = data.matchers[String(r[2])];
+      const key = m.name || (m.kind.toLowerCase() + ': ' + m.label);
+      const e = per.get(key) || { n: 0, ok: 0, fail: 0, skip: 0, cache: 0, name: m.name };
+      e.n++;
+      const x = r[6];
+      if (x === 'cache_ok' || x === 'cache_fail') e.cache++;
+      else if (x === 'skip' || x === 'skip_opt') e.skip++;
+      else if (isOk(x)) e.ok++; else e.fail++;
+      per.set(key, e);
+    }
+    const rows = [...per.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, 60);
+    const t = document.createElement('table'); t.className = 'stats';
+    t.innerHTML = '<tr><th>matcher</th><th>attempts</th><th>ok</th><th>failed</th><th>skipped</th><th>cache</th></tr>' +
+      rows.map(([k, e]) => `<tr><td>${e.name ? `<span class="rule" data-rule="${esc(e.name)}">${esc(k)}</span>` : `<span class="mono">${esc(k.slice(0, 70))}</span>`}</td><td>${e.n}</td><td>${e.ok}</td><td>${e.fail}</td><td>${e.skip}</td><td>${e.cache}</td></tr>`).join('');
+    t.querySelectorAll('.rule').forEach(el => el.addEventListener('click', () => showRule(el.dataset.rule)));
+    const wrap = document.createElement('div');
+    const o = data.options;
+    wrap.innerHTML = `<p class="meta">options: packrat ${o.packrat ? 'on' : 'off'}, FIRST-set skipping ${o.first_set_skip ? 'on' : 'off'} · ${data.tokens.length} tokens · ${data.trace.length.toLocaleString()} attempts · ${data.elapsed_ms} ms</p><p class="meta">Top matchers by number of attempts:</p>`;
+    wrap.appendChild(t);
+    return wrap;
+  }
+
+  function showRule(name) {
+    selectedRule = name; tab = 'rule';
+    document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === 'rule'));
+    renderRight();
+  }
+
+  // ---------------------------------------------------------------- events
+  // when filters change, keep the user's expansion and make sure newly visible rows on the main path are open
+  function refilter() {
+    const keep = expanded;
+    defaultExpansion();
+    for (const k of keep) expanded.add(k);
+    renderTrace();
+  }
+  $('parse').addEventListener('click', parse);
+  $('copy-link').addEventListener('click', async () => {
+    writeHash();
+    try { await navigator.clipboard.writeText(location.href); $('copy-link').textContent = 'copied!'; }
+    catch (e) { prompt('Copy this link:', location.href); }
+    setTimeout(() => { $('copy-link').textContent = 'copy link'; }, 1500);
+  });
+  window.addEventListener('hashchange', () => { readHash(); parse(); });
+  $('sql').addEventListener('keydown', (e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); parse(); } });
+  $('sql').addEventListener('input', scheduleParse);
+  $('start-rule').addEventListener('input', scheduleParse);
+  $('opt-packrat').addEventListener('change', scheduleParse);
+  $('opt-first').addEventListener('change', scheduleParse);
+  $('opt-live').addEventListener('change', () => { if ($('opt-live').checked) parse(); });
+  $('examples').addEventListener('change', (e) => { if (e.target.value) { $('sql').value = e.target.value; parse(); } });
+  ['f-structure', 'f-compact', 'f-fail', 'f-skip', 'f-empty', 'f-atomic'].forEach(id => $(id).addEventListener('change', () => data && refilter()));
+  $('f-search').addEventListener('input', () => data && renderTrace());
+  $('exp-ok').addEventListener('click', () => { if (!data) return; defaultExpansion(); renderTrace(); });
+  $('exp-all').addEventListener('click', () => { if (!data) return; buildView(); if (vnodeByKey.size > 20000 && !confirm('Expanding ' + vnodeByKey.size + ' rows may be slow. Continue?')) return; for (const k of vnodeByKey.keys()) expanded.add(k); renderTrace(); });
+  $('col-all').addEventListener('click', () => { if (!data) return; expanded = new Set([0]); renderTrace(); });
+  $('pt-empty').addEventListener('change', renderRight);
+  $('pt-compact').addEventListener('change', renderRight);
+  document.querySelectorAll('#view-seg button').forEach(b => b.addEventListener('click', () => { view = b.dataset.view; setSeg(); if (data) renderTrace(); }));
+  document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => {
+    tab = b.dataset.tab;
+    document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('active', x === b));
+    renderRight();
+  }));
+  readHash();
+  parse();
+})();
+</script>
+</body>
+</html>
